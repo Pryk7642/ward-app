@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ระบบจัดการเตียงและยา</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-sky-50 text-slate-900 p-4">
+<div id="app"></div>
+
+<script>
+const app = document.getElementById("app");
+const uuid = () => crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+
+let beds = JSON.parse(localStorage.getItem("medward.beds") || "[]");
+let view = "list";
+let currentBedId = null;
+let taskForm = { drug: "", time: "", note: "" };
+let form = { bed: "", patient: "" };
+let tempTasks = [];
+
+async function ensurePermission() {
+  if (!("Notification" in window)) {
+    alert("เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือน");
+    return false;
+  }
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission === "denied") {
+    alert("คุณบล็อกการแจ้งเตือนไว้ในเบราว์เซอร์");
+    return false;
+  }
+  const result = await Notification.requestPermission();
+  return result === "granted";
+}
+
+const permBtn = document.createElement("button");
+permBtn.textContent = "เปิดการแจ้งเตือน";
+permBtn.className = "fixed bottom-4 right-4 px-3 py-2 rounded-xl bg-sky-600 text-white shadow";
+permBtn.onclick = async () => {
+  const ok = await ensurePermission();
+  if (ok) {
+    notify("พร้อมแจ้งเตือนแล้ว");
+    permBtn.remove(); // ขอสิทธิสำเร็จแล้วซ่อนปุ่ม
+  }
+};
+document.body.appendChild(permBtn);
+
+// ขออนุญาต Notification
+if("Notification" in window){
+  Notification.requestPermission();
+}
+function notify(msg){
+  if(Notification.permission==="granted"){
+    new Notification(msg);
+  }
+}
+
+function saveBeds(){ localStorage.setItem("medward.beds", JSON.stringify(beds)); }
+function currentBed(){ return beds.find(b=>b.id===currentBedId); }
+
+// --- ฟังก์ชันแจ้งเตือน ---
+function getNextTaskInfo(bed){
+  const now = new Date();
+  const upcoming = bed.tasks
+    .filter(t => !t.done && t.time)
+    .map(t=>{
+      const [h,m]=t.time.split(":").map(Number);
+      const taskDate = new Date();
+      taskDate.setHours(h,m,0,0);
+      let diff = Math.round((taskDate - now)/60000);
+      if(diff<0) diff=0;
+      return {drug:t.drug,time:t.time,minutes:diff};
+    })
+    .sort((a,b)=>a.minutes-b.minutes);
+  return upcoming[0]||null;
+}
+
+// --- ตรวจเวลาให้ยา แจ้ง Notification ---
+// function checkTasks(){
+//   const now=new Date();
+//   beds.forEach(b=>{
+//     b.tasks.forEach(t=>{
+//       if(!t.done && t.time){
+//         const [h,m]=t.time.split(":").map(Number);
+        
+//         // const early = new Date(taskDate.getTime() - 5*60*1000);
+//         // แจ้งเตือนล่วงหน้า 5 นาที
+//         if(now.getHours()===early.getHours() && now.getMinutes()===early.getMinutes()){
+//           notify(`เตียง ${b.bed} จะให้ยา ${t.drug} ในอีก 5 นาที (${t.time})`);
+//         }
+
+//         // แจ้งเตือนตรงเวลา (ถ้ายังต้องการ)
+//         if(now.getHours()===h && now.getMinutes()===m){
+//           notify(`เตียง ${b.bed} ให้ยา ${t.drug} ตอนนี้!`);
+//         }
+//       }
+//     });
+//   });
+// }
+
+function checkTasks(){
+  const now = new Date();
+  beds.forEach(b=>{
+    b.tasks.forEach(t=>{
+      if(!t.done && t.time){
+        const [h,m] = t.time.split(":").map(Number);
+        const taskDate = new Date();
+        taskDate.setHours(h, m, 0, 0);
+        const early = new Date(taskDate.getTime() - 5*60*1000);
+        if(now.getHours()===early.getHours() && now.getMinutes()===early.getMinutes()){
+          notify(`เตียง ${b.bed} จะให้ยา ${t.drug} ในอีก 5 นาที (${t.time})`);
+        }
+
+        // แจ้งเตือนตรงเวลา (ถ้ายังต้องการ)
+        if(now.getHours()===h && now.getMinutes()===m){
+          notify(`เตียง ${b.bed} ให้ยา ${t.drug} ตอนนี้!`);
+        }
+      }
+    });
+  });
+}
+
+
+// --- Render ---
+function render(){
+  app.innerHTML="";
+  if(view==="list") renderList();
+  else if(view==="addBed") renderAddBed();
+  else if(view==="bedDetail") renderBedDetail();
+}
+
+// --- หน้า List ---
+function renderList(){
+  const container=document.createElement("div");
+  const h1=document.createElement("h1");
+  h1.className="text-xl font-bold mb-4";
+  h1.innerText="รายการเตียงทั้งหมด";
+  container.appendChild(h1);
+
+  const grid=document.createElement("div");
+  grid.className="grid gap-3";
+
+  beds.forEach(b=>{
+    const total=b.tasks.length;
+    const done=b.tasks.filter(t=>t.done).length;
+
+    const card=document.createElement("div");
+    card.className="bg-white border rounded-xl p-4 flex justify-between items-center";
+
+    const info=document.createElement("div");
+    info.innerHTML=`<div class="font-bold">เตียง ${b.bed}</div>
+    <div class="text-sm text-slate-600">ผู้ป่วย: ${b.patient||"-"}</div>
+    <div class="text-sm text-slate-600">ทำแล้ว ${done}/${total}</div>`;
+
+    // แจ้งเตือนครั้งต่อไป
+    const nextTask=getNextTaskInfo(b);
+    if(nextTask){
+      const warnDiv=document.createElement("div");
+      warnDiv.className="text-sm text-red-600";
+      warnDiv.innerText=`ครั้งต่อไป: ${nextTask.drug} เวลา ${nextTask.time} (อีก ${nextTask.minutes} นาที)`;
+      info.appendChild(warnDiv);
+    }
+
+    card.appendChild(info);
+
+    const btnDiv=document.createElement("div");
+    btnDiv.className="flex gap-2";
+
+    const viewBtn=document.createElement("button");
+    viewBtn.className="px-3 py-1.5 rounded-xl bg-sky-600 text-white";
+    viewBtn.innerText="ดูรายละเอียด";
+    viewBtn.onclick=()=>{currentBedId=b.id; view="bedDetail"; render();}
+    btnDiv.appendChild(viewBtn);
+
+    const delBtn=document.createElement("button");
+    delBtn.className="px-3 py-1.5 rounded-xl bg-red-600 text-white";
+    delBtn.innerText="ลบเตียง";
+    delBtn.onclick=()=>{
+      if(confirm(`ลบเตียง ${b.bed} ?`)){
+        beds=beds.filter(x=>x.id!==b.id);
+        saveBeds();
+        render();
+      }
+    }
+    btnDiv.appendChild(delBtn);
+
+    card.appendChild(btnDiv);
+    grid.appendChild(card);
+  });
+
+  container.appendChild(grid);
+
+  const addBtn=document.createElement("button");
+  addBtn.className="mt-4 px-4 py-2 rounded-xl bg-emerald-600 text-white";
+  addBtn.innerText="เพิ่มเตียง";
+  addBtn.onclick=()=>{form={bed:"",patient:""}; tempTasks=[]; taskForm={drug:"",time:"",note:""}; view="addBed"; render();}
+  container.appendChild(addBtn);
+
+  app.appendChild(container);
+}
+
+// --- หน้า เพิ่มเตียง ---
+function renderAddBed(){
+  const container=document.createElement("div");
+  container.className="max-w-md mx-auto";
+
+  const h2=document.createElement("h2");
+  h2.className="text-lg font-bold mb-2";
+  h2.innerText="เพิ่มเตียงใหม่";
+  container.appendChild(h2);
+
+  const bedDiv=document.createElement("div");
+  bedDiv.className="mb-2";
+  bedDiv.innerHTML=`<label class="text-sm">ชื่อเตียง/ห้อง</label>
+    <input class="w-full border rounded px-2 py-1" value="${form.bed}">`;
+  bedDiv.querySelector("input").oninput=e=>form.bed=e.target.value;
+  container.appendChild(bedDiv);
+
+  const patientDiv=document.createElement("div");
+  patientDiv.className="mb-4";
+  patientDiv.innerHTML=`<label class="text-sm">ชื่อผู้ป่วย</label>
+    <input class="w-full border rounded px-2 py-1" value="${form.patient}">`;
+  patientDiv.querySelector("input").oninput=e=>form.patient=e.target.value;
+  container.appendChild(patientDiv);
+
+  // --- เพิ่มรายการยา ---
+  const taskDiv=document.createElement("div");
+  taskDiv.innerHTML=`<h3 class="text-md font-semibold mb-2">รายการยา / ขั้นตอน</h3>
+    <div class="mb-2"><label class="text-sm">ชื่อยา / ขั้นตอน</label>
+    <input class="w-full border rounded px-2 py-1" value="${taskForm.drug}" placeholder="เช่น Paracetamol 500mg"></div>
+    <div class="mb-2"><label class="text-sm">เวลาให้ยา</label>
+    <input type="time" step="60" class="w-full border rounded px-2 py-1" value="${taskForm.time}"></div>
+    <div class="mb-2"><label class="text-sm">หมายเหตุ</label>
+    <input class="w-full border rounded px-2 py-1" value="${taskForm.note}" placeholder="IV drip / หลังอาหาร"></div>
+    <button class="px-3 py-1.5 rounded bg-emerald-600 text-white mb-3">เพิ่มรายการ</button>`;
+  const inputs=taskDiv.querySelectorAll("input");
+  inputs[0].oninput=e=>taskForm.drug=e.target.value;
+  inputs[1].oninput=e=>taskForm.time=e.target.value;
+  inputs[2].oninput=e=>taskForm.note=e.target.value;
+  taskDiv.querySelector("button").onclick=()=>{
+    if(!taskForm.drug) return;
+    tempTasks.push({...taskForm,id:uuid(),done:false});
+    taskForm={drug:"",time:"",note:""};
+    render();
+  };
+  container.appendChild(taskDiv);
+
+  // แสดงรายการชั่วคราว
+  const listDiv=document.createElement("div");
+  listDiv.className="mb-4";
+  if(tempTasks.length===0) listDiv.innerHTML=`<div class="text-slate-500 text-sm">ยังไม่มีรายการ</div>`;
+  else tempTasks.forEach(t=>{
+    const tDiv=document.createElement("div");
+    tDiv.className="bg-white border rounded p-2 mb-2 text-sm";
+    tDiv.innerHTML=`<div class="font-medium">${t.drug}</div>
+      <div class="text-slate-500">เวลา: ${t.time||"-"}</div>
+      <div class="text-slate-500">หมายเหตุ: ${t.note||"-"}</div>`;
+    listDiv.appendChild(tDiv);
+  });
+  container.appendChild(listDiv);
+
+  const btnDiv=document.createElement("div");
+  btnDiv.className="flex gap-2";
+  const saveBtn=document.createElement("button");
+  saveBtn.className="px-3 py-1.5 rounded bg-sky-600 text-white";
+  saveBtn.innerText="บันทึก";
+  saveBtn.onclick=()=>{
+    if(!form.bed) return;
+    beds.push({id:uuid(),bed:form.bed,patient:form.patient,tasks:tempTasks});
+    saveBeds(); view="list"; render();
+  }
+  const cancelBtn=document.createElement("button");
+  cancelBtn.className="px-3 py-1.5 rounded bg-slate-200";
+  cancelBtn.innerText="ยกเลิก";
+  cancelBtn.onclick=()=>{view="list"; render();}
+  btnDiv.appendChild(saveBtn); btnDiv.appendChild(cancelBtn);
+  container.appendChild(btnDiv);
+
+  app.appendChild(container);
+}
+
+// --- หน้า รายละเอียดเตียง ---
+function renderBedDetail(){
+  const bed=currentBed();
+  if(!bed){view="list"; render(); return;}
+  const container=document.createElement("div");
+
+  const backBtn=document.createElement("button");
+  backBtn.className="mb-3 text-sky-600";
+  backBtn.innerText="← กลับ";
+  backBtn.onclick=()=>{view="list"; render();}
+  container.appendChild(backBtn);
+
+  const h2=document.createElement("h2");
+  h2.className="text-lg font-bold";
+  h2.innerText=`เตียง ${bed.bed}`;
+  container.appendChild(h2);
+
+  const p=document.createElement("div");
+  p.className="text-sm text-slate-600 mb-3";
+  p.innerText=`ผู้ป่วย: ${bed.patient}`;
+  container.appendChild(p);
+
+  // --- เพิ่มรายการยาใหม่ ---
+  const addTaskDiv=document.createElement("div");
+  addTaskDiv.className="mb-3";
+  addTaskDiv.innerHTML=`<h3 class="text-md font-semibold mb-2">เพิ่มรายการยา</h3>
+    <input class="w-full border rounded px-2 py-1 mb-2" placeholder="ชื่อยา" />
+    <input type="time" step="60" class="w-full border rounded px-2 py-1 mb-2" placeholder="เวลาให้ยา" />
+    <input class="w-full border rounded px-2 py-1 mb-2" placeholder="หมายเหตุ" />
+    <button class="px-3 py-1.5 rounded bg-emerald-600 text-white">เพิ่ม</button>`;
+  const inputs2=addTaskDiv.querySelectorAll("input");
+  const addBtn2=addTaskDiv.querySelector("button");
+  addBtn2.onclick=()=>{
+    if(!inputs2[0].value) return;
+    bed.tasks.push({id:uuid(),drug:inputs2[0].value,time:inputs2[1].value,note:inputs2[2].value,done:false});
+    saveBeds(); render();
+  };
+  container.appendChild(addTaskDiv);
+
+  // --- แสดงรายการยาเรียงตามเวลา ---
+  const tasksDiv=document.createElement("div");
+  const sortedTasks=[...bed.tasks].sort((a,b)=>{
+    if(!a.time) return 1;
+    if(!b.time) return -1;
+    return a.time.localeCompare(b.time);
+  });
+  if(sortedTasks.length===0) tasksDiv.innerHTML=`<div class="text-slate-500">ยังไม่มีขั้นตอน</div>`;
+  sortedTasks.forEach(t=>{
+    const tDiv=document.createElement("label");
+    tDiv.className="flex items-center gap-2 bg-white border p-2 rounded mb-1";
+    const checkbox=document.createElement("input");
+    checkbox.type="checkbox"; checkbox.checked=t.done;
+    checkbox.onchange=()=>{t.done=!t.done; saveBeds(); render();}
+    const infoDiv=document.createElement("div");
+    infoDiv.innerHTML=`<div class="font-medium">${t.drug}</div>
+      <div class="text-sm text-slate-500">เวลา: ${t.time||"-"} | ${t.note||"-"}</div>`;
+    const delBtn=document.createElement("button");
+    delBtn.className="px-2 py-1 text-xs bg-red-600 text-white rounded";
+    delBtn.innerText="ลบ";
+    delBtn.onclick=()=>{
+      if(confirm(`ลบรายการ ${t.drug}?`)){
+        bed.tasks=bed.tasks.filter(x=>x.id!==t.id);
+        saveBeds(); render();
+      }
+    };
+    tDiv.appendChild(checkbox); tDiv.appendChild(infoDiv); tDiv.appendChild(delBtn);
+    tasksDiv.appendChild(tDiv);
+  });
+  container.appendChild(tasksDiv);
+
+  app.appendChild(container);
+}
+
+// --- เรียก render ---
+render();
+// ตรวจสอบเวลาให้ยา ทุกนาที
+setInterval(()=>{checkTasks(); if(view==="list" || view==="bedDetail") render();},60000);
+
+</script>
+</body>
+</html>
