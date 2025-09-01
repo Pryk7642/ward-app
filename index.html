@@ -14,6 +14,7 @@ const app = document.getElementById("app");
 const uuid = () => crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
 
 let beds = JSON.parse(localStorage.getItem("medward.beds") || "[]");
+let remindQueue = JSON.parse(localStorage.getItem("medward.remind") || "[]");
 let view = "list";
 let currentBedId = null;
 let taskForm = { drug: "", time: "", note: "" };
@@ -58,6 +59,7 @@ function notify(msg){
 
 function saveBeds(){ localStorage.setItem("medward.beds", JSON.stringify(beds)); }
 function currentBed(){ return beds.find(b=>b.id===currentBedId); }
+function saveRemind(){ localStorage.setItem("medward.remind", JSON.stringify(remindQueue)); }
 
 // --- ฟังก์ชันแจ้งเตือน ---
 function getNextTaskInfo(bed){
@@ -77,30 +79,12 @@ function getNextTaskInfo(bed){
 }
 
 // --- ตรวจเวลาให้ยา แจ้ง Notification ---
-// function checkTasks(){
-//   const now=new Date();
-//   beds.forEach(b=>{
-//     b.tasks.forEach(t=>{
-//       if(!t.done && t.time){
-//         const [h,m]=t.time.split(":").map(Number);
-        
-//         // const early = new Date(taskDate.getTime() - 5*60*1000);
-//         // แจ้งเตือนล่วงหน้า 5 นาที
-//         if(now.getHours()===early.getHours() && now.getMinutes()===early.getMinutes()){
-//           notify(`เตียง ${b.bed} จะให้ยา ${t.drug} ในอีก 5 นาที (${t.time})`);
-//         }
-
-//         // แจ้งเตือนตรงเวลา (ถ้ายังต้องการ)
-//         if(now.getHours()===h && now.getMinutes()===m){
-//           notify(`เตียง ${b.bed} ให้ยา ${t.drug} ตอนนี้!`);
-//         }
-//       }
-//     });
-//   });
-// }
-
 function checkTasks(){
   const now = new Date();
+
+  // ประมวลผลคิวแจ้งเตือนซ้ำ
+  processReminders(now);
+
   beds.forEach(b=>{
     b.tasks.forEach(t=>{
       if(!t.done && t.time){
@@ -108,17 +92,49 @@ function checkTasks(){
         const taskDate = new Date();
         taskDate.setHours(h, m, 0, 0);
         const early = new Date(taskDate.getTime() - 5*60*1000);
-        if(now.getHours()===early.getHours() && now.getMinutes()===early.getMinutes()){
+
+        // ล่วงหน้า 5 นาที: Toast + Notification
+        if(now.getHours() === early.getHours() && now.getMinutes() === early.getMinutes()){
           notify(`เตียง ${b.bed} จะให้ยา ${t.drug} ในอีก 5 นาที (${t.time})`);
+          showToast(`เตียง ${b.bed}: อีก 5 นาทีให้ ${t.drug} (${t.time})`, "warn");
+          // ถ้าอยากให้เด้งป๊อปอัพด้วย ให้เปิดบรรทัดนี้:
+          showPopup(b, t, "early");
         }
 
-        // แจ้งเตือนตรงเวลา (ถ้ายังต้องการ)
-        if(now.getHours()===h && now.getMinutes()===m){
+        // ถึงเวลา: ป๊อปอัพ + Notification
+        if(now.getHours() === h && now.getMinutes() === m){
           notify(`เตียง ${b.bed} ให้ยา ${t.drug} ตอนนี้!`);
+          showPopup(b, t, "due");
         }
       }
     });
   });
+}
+
+function processReminders(now){
+  const due = remindQueue.filter(r => now.getTime() >= r.dueAt);
+  if(due.length === 0) return;
+  due.forEach(r=>{
+    const b = beds.find(x => x.id === r.bedId);
+    if(!b) return;
+    const t = b.tasks.find(x => x.id === r.taskId);
+    if(!t || t.done) return;
+    notify(`ย้ำเตือน: เตียง ${b.bed} ให้ยา ${t.drug} ตอนนี้`);
+    showPopup(b, t, "repeat");
+  });
+  remindQueue = remindQueue.filter(r => now.getTime() < r.dueAt);
+  saveRemind();
+}
+
+
+function scheduleRemindNextMinute(bedId, taskId){
+  const next = new Date();
+  next.setSeconds(0, 0);
+  // ลบคิวเดิมของงานนี้ก่อน กันซ้ำ
+  remindQueue = remindQueue.filter(x => !(x.bedId === bedId && x.taskId === taskId));
+  // ตั้งคิวให้ครบกำหนดในอีก 1 นาที
+  remindQueue.push({ bedId, taskId, dueAt: next.getTime() + 60*1000 });
+  saveRemind();
 }
 
 
@@ -351,6 +367,105 @@ function renderBedDetail(){
   container.appendChild(tasksDiv);
 
   app.appendChild(container);
+}
+
+// Toast container
+const toastRoot = document.createElement("div");
+toastRoot.className = "fixed top-4 right-4 z-50 space-y-2";
+document.body.appendChild(toastRoot);
+
+function showToast(msg, type = "info") {
+  const color = type === "error" ? "bg-red-600" : type === "warn" ? "bg-amber-500" : "bg-sky-600";
+  const el = document.createElement("div");
+  el.className = `${color} text-white rounded-lg shadow px-3 py-2`;
+  el.textContent = msg;
+  toastRoot.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function addMinutesToTime(timeStr, minutes) {
+  if (!timeStr) return timeStr;
+  const [h, m] = timeStr.split(":").map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  d.setMinutes(d.getMinutes() + minutes);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+function showPopup(bed, task, mode = "due") {
+  const overlay = document.createElement("div");
+  overlay.className = "fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4";
+  const box = document.createElement("div");
+  box.className = "bg-white rounded-xl shadow-lg max-w-sm w-full p-4";
+
+  const title = document.createElement("div");
+  title.className = "font-bold text-lg mb-1";
+  // title.textContent = mode === "early" ? `อีก 5 นาที: ${task.drug}` : `ถึงเวลาให้ยา: ${task.drug}`;
+  const titleText =
+    mode === "early"
+      ? `อีก 5 นาที: ${task.drug}`
+      : mode === "repeat"
+      ? `ย้ำเตือน: ${task.drug}`
+      : `ถึงเวลาให้ยา: ${task.drug}`;
+  title.textContent = titleText;
+
+  const sub = document.createElement("div");
+  sub.className = "text-slate-600 text-sm mb-3";
+  sub.textContent = `เตียง ${bed.bed} เวลา ${task.time}${task.note ? " • " + task.note : ""}`;
+
+  const actions = document.createElement("div");
+  actions.className = "flex gap-2 justify-end";
+
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "px-3 py-1.5 rounded bg-slate-200";
+  closeBtn.textContent = "ปิด";
+  closeBtn.onclick = () => overlay.remove();
+
+  const snoozeBtn = document.createElement("button");
+  snoozeBtn.className = "px-3 py-1.5 rounded bg-amber-500 text-white";
+  snoozeBtn.textContent = "เลื่อนเวลาให้ยา 5 นาที";
+  snoozeBtn.onclick = () => {
+    task.time = addMinutesToTime(task.time, 5);
+    saveBeds();
+    render();
+    overlay.remove();
+    showToast(`เลื่อน ${task.drug} เป็นเวลา ${task.time}`, "warn");
+  };
+
+  const repeatBtn = document.createElement("button");
+  repeatBtn.className = "px-3 py-1.5 rounded bg-sky-600 text-white";
+  repeatBtn.textContent = "แจ้งอีกใน 1 นาที";
+  repeatBtn.onclick = () => {
+    scheduleRemindNextMinute(bed.id, task.id);
+    overlay.remove();
+    showToast(`จะย้ำเตือน ${task.drug} อีกใน 1 นาที`, "info");
+  };
+
+  const doneBtn = document.createElement("button");
+  doneBtn.className = "px-3 py-1.5 rounded bg-emerald-600 text-white";
+  doneBtn.textContent = "ทำแล้ว";
+  doneBtn.onclick = () => {
+    task.done = true;
+    saveBeds();
+    render();
+    overlay.remove();
+  };
+
+  
+
+  box.appendChild(title);
+  box.appendChild(sub);
+
+  actions.appendChild(closeBtn);
+  if (mode === "due") actions.appendChild(doneBtn); // ป๊อปอัพตอนถึงเวลาให้ปุ่ม "ทำแล้ว"
+  actions.appendChild(repeatBtn);
+  actions.appendChild(snoozeBtn);
+
+  box.appendChild(actions);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
 }
 
 // --- เรียก render ---
